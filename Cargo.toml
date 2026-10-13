@@ -1,0 +1,24 @@
+[package]
+name = "maskor"
+version = "0.1.0"
+edition = "2021"
+description = "문장에서 지정한 단어를 빠르게 찾아 블러 처리하는 한국어 마스킹 라이브러리"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aho-corasick = "1.1"
+napi = "3.0.0"
+napi-derive = "3.0.0"
+unicode-normalization = "0.1"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"

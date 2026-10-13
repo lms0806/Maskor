@@ -1,0 +1,38 @@
+{
+  "name": "maskor",
+  "version": "0.1.0",
+  "description": "문장에서 지정한 단어를 빠르게 찾아 블러 처리하는 한국어 마스킹 라이브러리",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "files": [
+    "index.d.ts",
+    "index.js"
+  ],
+  "keywords": [
+    "korean",
+    "mask",
+    "blur",
+    "napi-rs",
+    "rust"
+  ],
+  "napi": {
+    "binaryName": "maskor",
+    "targets": [
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "engines": {
+    "node": ">= 14"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "cargo test && node --test __test__/*.test.mjs",
+    "test:rust": "cargo test",
+    "test:js": "node --test __test__/*.test.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.9.1"
+  }
+}
