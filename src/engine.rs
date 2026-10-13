@@ -1,14 +1,19 @@
 //! 여러 단어를 한 번에 찾는 마스킹 엔진.
 //!
 //! 단어 목록으로 Aho–Corasick 자동자(automaton)를 한 번 만들고,
-//! 이후 문장은 길이에 비례하는 시간에 검색한다.
-//! 같은 위치에서 여러 단어가 맞으면 더 긴 단어를 택한다.
+//! 문장은 공백 기준 어절로 나누어 검색한다.
+//! 어절이 단어로 시작하고 뒤에 조사나 문장부호만 남을 때만 가린다.
+//! 같은 어절에서 여러 단어가 맞으면 더 긴 단어를 택한다.
+
+mod josa;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use aho_corasick::{AhoCorasick, MatchKind};
+use aho_corasick::AhoCorasick;
 use unicode_normalization::{is_nfc, UnicodeNormalization};
+
+use josa::remainder_is_josa_or_punct;
 
 /// 블러 처리된 문장과, 정규화된 원문 기준의 일치 구간.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +60,6 @@ impl Engine {
         }
 
         let ac = AhoCorasick::builder()
-            .match_kind(MatchKind::LeftmostLongest)
             .build(&patterns)
             .map_err(|err| format!("단어 목록으로 검색기를 만들지 못했습니다: {err}"))?;
 
@@ -70,9 +74,9 @@ impl Engine {
 
     /// `text`에서 단어를 찾아 `mask`로 가린다.
     ///
-    /// 입력은 NFC로 정규화한 뒤 검색한다. 마스킹 문자는 일치 구간의
-    /// UTF-16 코드 단위마다 하나씩 들어가서, 정규화된 원문과 결과의
-    /// 길이가 같다. `mask`는 BMP 문자여야 한다.
+    /// 입력은 NFC로 정규화한 뒤, 공백으로 나눈 어절마다 검사한다.
+    /// 마스킹 문자는 일치 구간의 UTF-16 코드 단위마다 하나씩 들어가서,
+    /// 정규화된 원문과 결과의 길이가 같다. `mask`는 BMP 문자여야 한다.
     pub fn blur(&self, text: &str, mask: char) -> BlurOutput {
         debug_assert!(
             mask.len_utf16() == 1,
@@ -89,38 +93,80 @@ impl Engine {
 
         let mut text_out = String::with_capacity(normalized.len());
         let mut spans = Vec::new();
-        let mut last = 0usize;
         let mut utf16_at = 0u32;
+        let mut rest = normalized.as_ref();
 
-        for mat in self.ac.find_iter(normalized.as_ref()) {
-            let gap = &normalized[last..mat.start()];
-            text_out.push_str(gap);
-            utf16_at += utf16_len(gap);
+        while !rest.is_empty() {
+            let (is_eojeol, len) = next_segment(rest);
+            let segment = &rest[..len];
+            rest = &rest[len..];
 
-            let matched = &normalized[mat.start()..mat.end()];
+            if !is_eojeol {
+                text_out.push_str(segment);
+                utf16_at += utf16_len(segment);
+                continue;
+            }
+
+            let Some(end) = self.mask_end(segment) else {
+                text_out.push_str(segment);
+                utf16_at += utf16_len(segment);
+                continue;
+            };
+
+            let matched = &segment[..end];
+            let suffix = &segment[end..];
             let units = utf16_len(matched);
             let start = utf16_at;
-            let end = utf16_at + units;
+            let span_end = utf16_at + units;
             spans.push(BlurSpan {
                 word: matched.to_owned(),
                 start,
-                end,
+                end: span_end,
             });
-
             for _ in 0..units {
                 text_out.push(mask);
             }
-
-            utf16_at = end;
-            last = mat.end();
+            utf16_at = span_end;
+            text_out.push_str(suffix);
+            utf16_at += utf16_len(suffix);
         }
 
-        text_out.push_str(&normalized[last..]);
         BlurOutput {
             text: text_out,
             spans,
         }
     }
+
+    /// 어절 앞에서 시작하는 단어 중, 나머지가 조사·문장부호인 가장 긴 단어의 끝 위치.
+    fn mask_end(&self, eojeol: &str) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        for mat in self.ac.find_overlapping_iter(eojeol) {
+            if mat.start() != 0 {
+                continue;
+            }
+            if remainder_is_josa_or_punct(&eojeol[mat.end()..]) {
+                best = Some(best.map_or(mat.end(), |end| end.max(mat.end())));
+            }
+        }
+        best
+    }
+}
+
+/// 다음 조각이 어절이면 참과 바이트 길이를, 공백이면 거짓과 바이트 길이를 반환한다.
+fn next_segment(text: &str) -> (bool, usize) {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return (false, 0);
+    };
+    let is_eojeol = !first.is_whitespace();
+    let mut end = first.len_utf8();
+    for ch in chars {
+        if ch.is_whitespace() == is_eojeol {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+    (is_eojeol, end)
 }
 
 fn normalize_nfc(text: &str) -> Cow<'_, str> {
@@ -189,34 +235,37 @@ mod tests {
 
     #[test]
     fn keeps_literal_characters() {
-        let result = blur("가격은 1,000원이다", &[".", "*", "1,000"]);
-        assert_eq!(result.text, "가격은 *****원이다");
+        let result = blur("기호는 . 와 * 이다", &[".", "*"]);
+        assert_eq!(result.text, "기호는 * 와 * 이다");
+        assert_eq!(blur("1,000원이다", &["1,000"]).text, "1,000원이다");
+        assert_eq!(blur("1,000은 남는다", &["1,000"]).text, "*****은 남는다");
     }
 
     #[test]
     fn matches_decomposed_hangul() {
-        let text = "\u{1100}\u{1161}나다";
+        let text = "\u{1100}\u{1161}는";
         let result = blur(text, &["가"]);
-        assert_eq!(result.text, "*나다");
+        assert_eq!(result.text, "*는");
         assert_eq!(result.spans[0].word, "가");
         assert_eq!((result.spans[0].start, result.spans[0].end), (0, 1));
     }
 
     #[test]
     fn preserves_utf16_length_around_emoji() {
-        let result = blur("비밀😊비밀", &["비밀"]);
-        assert_eq!(result.text, "**😊**");
+        let source = "비밀 😊 비밀";
+        let result = blur(source, &["비밀"]);
+        assert_eq!(result.text, "** 😊 **");
         assert_eq!(
             result
                 .spans
                 .iter()
                 .map(|span| (span.start, span.end))
                 .collect::<Vec<_>>(),
-            vec![(0, 2), (4, 6)]
+            vec![(0, 2), (6, 8)]
         );
         assert_eq!(
             result.text.encode_utf16().count(),
-            "비밀😊비밀".encode_utf16().count()
+            source.encode_utf16().count()
         );
     }
 
@@ -225,7 +274,29 @@ mod tests {
         let engine = Engine::new(["", "금지어", "금지어", "\u{1100}\u{1161}"]).unwrap();
         assert_eq!(engine.word_count(), 2);
         assert_eq!(engine.blur("금지어만", '*').text, "***만");
-        assert_eq!(engine.blur("가나다", '*').text, "*나다");
+        assert_eq!(engine.blur("가는", '*').text, "*는");
+    }
+
+    #[test]
+    fn leaves_stem_inside_longer_word() {
+        let result = blur("사과나무는 크다", &["사과"]);
+        assert_eq!(result.text, "사과나무는 크다");
+        assert!(result.spans.is_empty());
+        assert_eq!(blur("자동차는 빠르다", &["자동"]).text, "자동차는 빠르다");
+    }
+
+    #[test]
+    fn masks_particle_forms_only() {
+        assert_eq!(blur("사과는 달다", &["사과"]).text, "**는 달다");
+        assert_eq!(blur("사과나무는 크다", &["사과나무"]).text, "****는 크다");
+        assert_eq!(blur("자동차는 빠르다", &["자동차"]).text, "***는 빠르다");
+        assert_eq!(blur("사과, 배", &["사과"]).text, "**, 배");
+        assert_eq!(blur("학교에서는 만났다.", &["학교"]).text, "**에서는 만났다.");
+        assert_eq!(blur("홍길동은.", &["홍길동"]).text, "***은.");
+        assert_eq!(
+            blur("서울은 서울특별시는 크다", &["서울", "서울특별시"]).text,
+            "**은 *****는 크다"
+        );
     }
 
     #[test]

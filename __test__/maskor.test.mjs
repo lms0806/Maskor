@@ -12,6 +12,13 @@ test('문장에 붙은 조사는 남기고 단어만 가린다', () => {
   assert.deepEqual(result.spans, [{ word: '홍길동', start: 0, end: 3 }])
 })
 
+test('더 긴 단어 일부인 말은 가리지 않는다', () => {
+  assert.equal(blur('사과나무는 크다', ['사과']).text, '사과나무는 크다')
+  assert.equal(blur('사과는 달다', ['사과']).text, '**는 달다')
+  assert.equal(blur('자동차는 빠르다', ['자동']).text, '자동차는 빠르다')
+  assert.equal(blur('자동차는 빠르다', ['자동차']).text, '***는 빠르다')
+})
+
 test('더 긴 단어를 우선하고 마스킹 문자를 바꿀 수 있다', () => {
   const maskor = new Maskor(['서울', '서울특별시'])
 
